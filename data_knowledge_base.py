@@ -344,36 +344,40 @@ def interactive_qa(brain):
             print("正在思考...")
             
             try:
-                # 直接使用Brain的ask方法，只传递必要参数
-                response = brain.ask(
-                    question=question,
-                    chat_history=chat_history
-                )
-                print(f"使用Brain.ask成功")
-            except Exception as e:
-                # 如果失败，尝试其他可能的调用方式
-                print(f"Brain.ask调用失败: {e}")
-                print("尝试其他方式调用ask...")
+                # 检查Brain类中可用的方法
+                methods = [method for method in dir(brain) if callable(getattr(brain, method)) and not method.startswith('_')]
+                print(f"Brain类的可用方法: {methods}")
                 
+                # 使用异步aask方法并处理事件循环
+                import asyncio
+                
+                # 检查当前是否有事件循环
                 try:
-                    # 检查Brain类中可用的方法
-                    methods = [method for method in dir(brain) if callable(getattr(brain, method)) and not method.startswith('_')]
-                    print(f"Brain类的可用方法: {methods}")
+                    loop = asyncio.get_event_loop()
+                except RuntimeError:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
                     
-                    # 尝试不同参数调用ask
-                    response = brain.ask(question)
-                except Exception as e2:
-                    print(f"替代调用也失败: {e2}")
-                    # 如果所有尝试都失败，创建一个模拟的响应
-                    from dataclasses import dataclass
-                    
-                    @dataclass
-                    class MockResponse:
-                        answer: str
-                    
-                    response = MockResponse(
-                        answer=f"无法连接到知识库服务。错误: {e}"
-                    )
+                # 调用异步aask方法
+                response = loop.run_until_complete(brain.aask(
+                    question=question
+                ))
+                print(f"使用Brain.aask成功")
+                
+            except Exception as e:
+                print(f"Brain.aask调用失败: {e}")
+                print("尝试其他方式...")
+                
+                # 如果失败，创建一个模拟的响应
+                from dataclasses import dataclass
+                
+                @dataclass
+                class MockResponse:
+                    answer: str
+                
+                response = MockResponse(
+                    answer=f"无法连接到知识库服务。错误: {e}"
+                )
             print("回答:")
             print(response.answer)
             print("-" * 50)
