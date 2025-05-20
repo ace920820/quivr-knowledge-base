@@ -188,7 +188,7 @@ def create_brain_from_documents(files, brain_name="data_knowledge_base"):
         try:
             # 发送简单请求测试连接
             response = client.chat.completions.create(
-                model="gpt-3.5-turbo",
+                model="gpt-4o-mini",
                 messages=[{"role": "user", "content": "Hello"}],
                 max_tokens=5
             )
@@ -203,7 +203,7 @@ def create_brain_from_documents(files, brain_name="data_knowledge_base"):
             model="text-embedding-3-small"  # 使用最新的嵌入模型
         )
         
-        print(f"使用模型: gpt-3.5-turbo, 嵌入模型: text-embedding-3-small")
+        print(f"使用模型:gpt-4o-mini, 嵌入模型: text-embedding-3-small")
         
         # 检查是否有PDF文件，如果有，使用我们的自定义处理器
         pdf_files = [f for f in files if str(f).lower().endswith('.pdf')]
@@ -564,9 +564,16 @@ def interactive_qa(brain):
             # 更新聊天历史 (如果回答有效)
             if response:
                 try:
-                    # 使用ChatHistory类的add_user_message和add_assistant_message方法
-                    chat_history.add_user_message(question)
-                    chat_history.add_assistant_message(response.answer)
+                    # 使用ChatHistory类的append方法
+                    from langchain_core.messages import HumanMessage, AIMessage
+                    
+                    # 创建消息对象并添加到聊天历史
+                    user_message = HumanMessage(content=question)
+                    assistant_message = AIMessage(content=response.answer)
+                    
+                    # 使用append添加消息
+                    chat_history.append(user_message)
+                    chat_history.append(assistant_message)
                     print("已更新聊天历史")
                 except Exception as chat_err:
                     print(f"更新聊天历史时出错: {chat_err}")
