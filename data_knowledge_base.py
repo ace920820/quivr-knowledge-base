@@ -1,22 +1,28 @@
 import os
-import sys
 import glob
+import json
 from pathlib import Path
+import tempfile
+import shutil
+import time
+import sys
 import traceback
 
 # 设置编码以解决Windows中文环境的问题
 os.environ['PYTHONIOENCODING'] = 'utf-8'
 sys.stdout.reconfigure(encoding='utf-8')
 
-# 确保控制台可以正确显示中文
-import locale
-print(f"当前系统编码: {locale.getpreferredencoding()}")
+# 检测系统编码
+print(f"当前系统编码: {sys.getdefaultencoding()}")
 
-# 从环境变量加载API凭证
-from dotenv import load_dotenv
-load_dotenv()
+# 加载环境变量
+try:
+    from dotenv import load_dotenv
+    load_dotenv()  # 加载.env文件中的环境变量
+except ImportError:
+    print("警告: python-dotenv库未安装, 无法加载.env文件")
 
-# 设置OpenAI API凭证为环境变量
+# 获取OpenAI API密钥和基础URL
 openai_api_key = os.getenv("OPENAI_API_KEY")
 openai_base_url = os.getenv("OPENAI_BASE_URL")
 
@@ -127,6 +133,28 @@ def create_brain_from_documents(files, brain_name="data_knowledge_base"):
         import sys
         import os
         from uuid import uuid4
+        import asyncio
+        from pathlib import Path
+        from langchain_core.documents import Document
+        
+        # 导入所需的模块
+        from importlib import import_module
+        
+        # 声明全局变量
+        global CustomPDFProcessor
+        CustomPDFProcessor = None
+        
+        # 检查是否有PDF文件
+        pdf_files = [f for f in files if f.lower().endswith('.pdf')]
+        if pdf_files:
+            print(f"检测到{len(pdf_files)}个PDF文件，将使用自定义处理器")
+            try:
+                # 尝试导入我们的自定义PDF处理器
+                module = import_module('custom_pdf_processor')
+                CustomPDFProcessor = module.CustomPDFProcessor
+                print("成功导入自定义PDF处理器")
+            except ImportError as e:
+                print(f"未找到自定义PDF处理器，将尝试其他方法: {e}")
         
         # 添加core目录到Python路径
         core_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'core')
@@ -175,8 +203,80 @@ def create_brain_from_documents(files, brain_name="data_knowledge_base"):
         
         print(f"使用模型: gpt-3.5-turbo, 嵌入模型: OpenAIEmbeddings")
         
-        # 创建Brain对象 - 直接使用OpenAI客户端
-        # 注意：这里我们直接传递OpenAI客户端而不是LLMEndpoint
+        # 检查是否有PDF文件，如果有，使用我们的自定义处理器
+        pdf_files = [f for f in files if str(f).lower().endswith('.pdf')]
+        
+        if pdf_files and CustomPDFProcessor is not None:
+            print(f"开始手动处理 {len(pdf_files)} 个 PDF 文件")
+            
+            # 手动处理PDF文件，生成文档对象
+            text_documents = []
+            
+            try:
+                # 实例化我们的自定义PDF处理器
+                # 创建 CustomPDFProcessor 实例
+                pdf_processor = CustomPDFProcessor()
+                print(f"已创建PDF处理器实例: {type(pdf_processor).__name__}")
+                
+                # 创建事件循环
+                try:
+                    loop = asyncio.get_event_loop()
+                except RuntimeError:
+                    # 如果当前线程没有事件循环，创建一个新的
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    print("创建了新的事件循环")
+                
+                # 处理每个PDF文件
+                for pdf_file in pdf_files:
+                    print(f"处理PDF文件: {pdf_file}")
+                    try:
+                        # 直接调用处理函数，不使用异步
+                        docs = loop.run_until_complete(pdf_processor.process_file(pdf_file))
+                        if docs:
+                            text_documents.extend(docs)
+                            print(f"成功处理PDF文件: {pdf_file}, 提取了 {len(docs)} 个文档")
+                        else:
+                            print(f"警告: {pdf_file} 没有提取到内容")
+                    except Exception as e:
+                        print(f"处理PDF文件 {pdf_file} 时出错: {str(e)}")
+                        print(traceback.format_exc())
+                
+                print(f"共处理了 {len(text_documents)} 个文档")
+                
+                # 如果我们成功提取了文本，则构建知识库
+                if text_documents:
+                    print("使用提取的文本构建知识库...")
+                    # 尝试使用正确的Brain方法来处理文档
+                    try:
+                        # 打印Brain类所有可用的方法，帮助确定正确的方法名
+                        methods = [m for m in dir(Brain) if not m.startswith('_') and callable(getattr(Brain, m))]
+                        print(f"Brain类的可用方法: {methods}")
+                        
+                        # 使用正确的afrom_langchain_documents方法
+                        # 首先创建异步事件循环
+                        event_loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(event_loop)
+                        
+                        # 调用异步方法
+                        brain = event_loop.run_until_complete(Brain.afrom_langchain_documents(
+                            name=brain_name,
+                            langchain_documents=text_documents,
+                            embedder=embedder
+                        ))
+                        print("使用自定义处理器成功创建Brain!")
+                        return brain
+                    except Exception as e:
+                        print(f"使用from_langchain_documents时出错: {str(e)}")
+                        # 可能是方法名称不同，尝试检查可用方法
+                        methods = [m for m in dir(Brain) if not m.startswith('_') and callable(getattr(Brain, m))]
+                        print(f"Brain可用方法: {methods}")
+            except Exception as e:
+                print(f"使用自定义处理器时出错: {str(e)}")
+                traceback.print_exc()
+                print("将尝试使用默认方法...")
+        
+        # 如果没有PDF文件或自定义处理失败，则使用默认方法
         print("准备创建Brain对象...")
         brain = Brain.from_files(
             name=brain_name,
@@ -240,16 +340,12 @@ def interactive_qa(brain):
                 print("感谢使用Quivr知识库，再见！")
                 break
             
-            # 生成每次请求的唯一run_id
-            run_id = uuid4()
-            
             # 获取回答
             print("正在思考...")
             
             try:
-                # 直接使用Brain的ask方法，传递必要参数
+                # 直接使用Brain的ask方法，只传递必要参数
                 response = brain.ask(
-                    run_id=run_id, 
                     question=question,
                     chat_history=chat_history
                 )
