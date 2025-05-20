@@ -7,6 +7,7 @@ import shutil
 import time
 import sys
 import traceback
+import traceback
 
 # 设置编码以解决Windows中文环境的问题
 os.environ['PYTHONIOENCODING'] = 'utf-8'
@@ -344,7 +345,8 @@ def save_brain(brain, data_dir):
         traceback.print_exc()
         return None
 
-# 交互式问答循环
+# 这是一个修复版的交互式问答函数
+
 def interactive_qa(brain):
     """启动交互式问答循环"""
     if brain is None:
@@ -353,16 +355,21 @@ def interactive_qa(brain):
     
     # 初始化聊天历史
     try:
-        from langchain_core.messages import HumanMessage, AIMessage
-    except ImportError:
-        print("警告: langchain_core未安装，将无法记录聊天历史")
-        HumanMessage = AIMessage = lambda content: type('Message', (), {'content': content})
+        # 导入正确的ChatHistory类
+        from quivr_core.rag.entities.chat import ChatHistory
+        from uuid import uuid4
+    except ImportError as e:
+        print(f"警告: 无法导入需要的聊天历史类: {e}")
+        sys.exit(1)
     
-    chat_history = []
+    # 创建正确的ChatHistory对象，而不是简单的列表
+    chat_id = str(uuid4())
+    brain_id = brain.info().brain_id if brain is not None else None
+    chat_history = ChatHistory(chat_id=chat_id, brain_id=brain_id)
     
     print("\n" + "=" * 50)
     print("欢迎使用 Quivr 知识库问答系统!")
-    print("您可以向知识库提问，输入 'exit' 或 'quit' 或 '退出' 退出对话")
+    print("你可以向知识库提问，输入 'exit' 或 'quit' 或 '退出' 退出对话")
     print("=" * 50 + "\n")
     
     # 创建事件循环
@@ -383,63 +390,64 @@ def interactive_qa(brain):
                 print("感谢使用Quivr知识库，再见！")
                 break
             
-            # 获取回答
             print("正在思考...")
             
-            # 检查Brain类中可用的方法
+            # 打印Brain类的可用方法（调试用）
             methods = [method for method in dir(brain) if callable(getattr(brain, method)) and not method.startswith('_')]
             print(f"Brain类的可用方法: {methods}")
             
-            # 查看brain的信息
+            # 获取Brain信息（调试用）
             try:
                 info = brain.info()
                 print(f"Brain ID: {info.brain_id}")
-                doc_count = '未知'
-                if hasattr(info, 'documents') and info.documents is not None:
-                    doc_count = len(info.documents)
+                doc_count = len(info.documents) if hasattr(info, 'documents') else "未知"
                 print(f"Brain中文档总数: {doc_count}")
             except Exception as info_err:
                 print(f"获取Brain信息失败: {info_err}")
             
-            # 默认响应，如果所有方法都失败时使用
+            # 初始化响应对象
             from dataclasses import dataclass
             @dataclass
             class MockResponse:
                 answer: str
             
             response = None
-            
-            # 先尝试使用asearch直接检索文档
-            print("先直接进行文档检索...")
             search_results = None
+            
+            # 第一步：直接进行文档搜索
+            print("先直接进行文档搜索...")
             try:
-                # 只使用query参数，不传递额外参数
+                # 调用异步搜索方法（仅传递query参数）
                 search_results = loop.run_until_complete(brain.asearch(query=question))
                 
                 if search_results and len(search_results) > 0:
                     print(f"文档搜索结果数量: {len(search_results)}")
                     print("搜索到的第一个文档片段:")
                     print("----内容开始----")
-                    # 检查SearchResult对象的结构并正确访问内容
+                    # 处理不同格式的搜索结果（兼容LangChain和Quivr格式）
                     result = search_results[0]
                     if hasattr(result, 'page_content'):
-                        # langchain文档格式
+                        # LangChain文档格式（包含page_content和metadata）
                         content = result.page_content
-                        metadata = result.metadata if hasattr(result, 'metadata') else {}
+                        metadata = result.metadata
                     elif hasattr(result, 'content'):
-                        # 可能是Quivr自定义格式
+                        # Quivr自定义格式（可能包含content和metadata）
                         content = result.content
-                        metadata = result.metadata if hasattr(result, 'metadata') else {}
+                        metadata = result.metadata
                     elif hasattr(result, 'text'):
-                        # 可能是另一种格式
+                        # 其他文本格式
                         content = result.text
-                        metadata = result.metadata if hasattr(result, 'metadata') else {}
+                        metadata = {}
+                    elif hasattr(result, 'chunk') and hasattr(result.chunk, 'page_content'):
+                        # 包含在chunk属性中的Document对象
+                        content = result.chunk.page_content
+                        metadata = result.chunk.metadata
                     else:
-                        # 处理未知格式
+                        # 未知格式，转为字符串处理
                         content = str(result)
                         metadata = {}
-                        # 尝试检查结果对象的所有属性
-                        print("搜索结果对象的属性:", dir(result))
+                        print("警告: 搜索结果对象格式未知，已转为字符串处理")
+                        print("对象属性:", dir(result))  # 打印属性用于调试
                     
                     print(content)
                     print("----内容结束----")
@@ -450,61 +458,126 @@ def interactive_qa(brain):
                     print("警告: 搜索未返回任何文档！这可能是问题所在。")
             except Exception as search_err:
                 print(f"搜索出错: {search_err}")
-                import traceback
                 traceback.print_exc()
             
-            # 尝试使用aask方法获取回答
+            # 第二步：准备知识库列表（基于搜索结果）
+            from quivr_core.rag.entities.models import QuivrKnowledge
+            from langchain_core.documents import Document
+            from pathlib import Path
+            import inspect
+            from uuid import uuid4
+            
+            result_chunks = []
+            knowledge_docs = []
+            
+            if search_results and len(search_results) > 0:
+                print(f"将使用 {len(search_results)} 条搜索结果作为回答上下文...")
+                
+                # 提取搜索结果中的Document对象
+                for i, result in enumerate(search_results[:3]):  # 最多取前3条结果
+                    try:
+                        if hasattr(result, 'chunk') and isinstance(result.chunk, Document):
+                            # 处理包含在chunk中的LangChain Document
+                            chunk = result.chunk
+                            result_chunks.append(chunk)
+                            print(f"已提取 SearchResult 中的 Document: {chunk.page_content[:100]}...")
+                        elif isinstance(result, Document):
+                            # 直接处理LangChain Document对象
+                            result_chunks.append(result)
+                    except Exception as extract_err:
+                        print(f"提取搜索结果信息时出错: {extract_err}")
+                
+                # 创建QuivrKnowledge对象列表（用于传入aask方法）
+                for doc in result_chunks:
+                    try:
+                        # 从文档元数据中获取文件名
+                        file_name = doc.metadata.get('file_name', '')
+                        if not file_name:
+                            file_name = Path(doc.metadata.get('source', '未知文件')).name
+                        
+                        # 必须提供file_name参数（QuivrKnowledge必填项）
+                        knowledge_item = QuivrKnowledge(
+                            id=str(uuid4()),  # 生成随机UUID
+                            file_name=file_name
+                        )
+                        knowledge_docs.append(knowledge_item)
+                        print(f"添加知识条目: {knowledge_item.file_name}")
+                    except Exception as k_err:
+                        print(f"创建知识条目时出错: {k_err}")
+                        # 兜底方案：使用默认文件名创建条目
+                        try:
+                            knowledge_item = QuivrKnowledge(
+                                id=str(uuid4()),
+                                file_name="backup_knowledge_item.txt"
+                            )
+                            knowledge_docs.append(knowledge_item)
+                            print(f"使用备用参数创建知识条目: {knowledge_item.file_name}")
+                        except Exception as backup_err:
+                            print(f"备用知识条目创建失败: {backup_err}")
+                            traceback.print_exc()
+                
+                print(f"正在使用 {len(knowledge_docs)} 个知识条目回答问题")
+            else:
+                print("未获取到搜索结果，将直接调用问答接口")
+            
+            # 第三步：调用aask方法获取回答（支持带参数和不带参数模式）
             print("调用aask方法获取回答...")
             try:
-                # 获取Brain.aask方法的参数信息
-                import inspect
+                # 打印aask方法参数（调试用）
                 aask_params = str(inspect.signature(brain.aask))
-                print(f"Brain.aask方法的参数: {aask_params}")
+                print(f"Brain.aask方法参数: {aask_params}")
                 
-                # 不使用额外参数，只传递必需的参数
-                try:
-                    # 先尝试最简单的调用方式，只传递question
-                    response = loop.run_until_complete(brain.aask(question=question))
-                    print("使用Brain.aask成功 (简单模式)")
-                except Exception as simple_err:
-                    print(f"简单模式调用失败: {simple_err}")
-                    
-                    # 如果简单模式失败，尝试添加chat_history参数
+                # 根据是否有预处理的文档，选择不同的调用方式
+                if knowledge_docs:
+                    response = loop.run_until_complete(brain.aask(
+                        question=question,
+                        list_files=knowledge_docs,  # 传入知识条目列表
+                        chat_history=chat_history
+                    ))
+                else:
                     response = loop.run_until_complete(brain.aask(
                         question=question,
                         chat_history=chat_history
                     ))
-                    print("使用Brain.aask成功 (带聊天历史)")
-            except Exception as e:
-                print(f"Brain.aask调用失败: {e}")
-                import traceback
+                print("使用Brain.aask成功")
+            except Exception as call_err:
+                print(f"调用aask出错: {call_err}")
                 traceback.print_exc()
-                print("尝试其他方式...")
                 
-                # 如果所有方法都失败，创建一个模拟的响应
-                response = MockResponse(
-                    answer=f"无法连接到知识库服务。错误: {e}"
-                )
+                # 兜底方案：尝试最简单的调用方式（仅传question）
+                try:
+                    print("尝试最简单的调用方式...")
+                    response = loop.run_until_complete(brain.aask(question=question))
+                    print("使用Brain.aask成功（简单模式）")
+                except Exception as simple_err:
+                    print(f"简单调用也失败: {simple_err}")
+                    response = MockResponse(answer=f"无法连接到知识库服务。错误: {call_err}")
             
-            # 打印回答
-            print("回答:")
-            if response:
+            # 打印回答结果
+            print("\n回答:")
+            if response and hasattr(response, 'answer'):
                 print(response.answer)
             else:
-                print("未能获取有效回答")
+                print("未获取到有效回答")
             print("-" * 50)
             
             # 更新聊天历史 (如果回答有效)
             if response:
-                chat_history.append(HumanMessage(content=question))
-                chat_history.append(AIMessage(content=response.answer))
+                try:
+                    # 使用ChatHistory类的add_user_message和add_assistant_message方法
+                    chat_history.add_user_message(question)
+                    chat_history.add_assistant_message(response.answer)
+                    print("已更新聊天历史")
+                except Exception as chat_err:
+                    print(f"更新聊天历史时出错: {chat_err}")
+                    traceback.print_exc()
+    
     except KeyboardInterrupt:
-        print("\n程序已被用户中断。谢谢使用Quivr知识库！")
+        print("\n操作已被用户中断。谢谢使用Quivr知识库！")
     except Exception as e:
         print(f"\n处理问题时出错: {str(e)}")
-        import traceback
         traceback.print_exc()
-
+        
 # 主程序
 def main():
     """主程序入口"""
