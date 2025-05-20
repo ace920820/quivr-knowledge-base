@@ -199,9 +199,10 @@ def create_brain_from_documents(files, brain_name="data_knowledge_base"):
         embedder = OpenAIEmbeddings(
             openai_api_key=openai_api_key,
             openai_api_base=openai_base_url or None,
+            model="text-embedding-3-small"  # 使用最新的嵌入模型
         )
         
-        print(f"使用模型: gpt-3.5-turbo, 嵌入模型: OpenAIEmbeddings")
+        print(f"使用模型: gpt-3.5-turbo, 嵌入模型: text-embedding-3-small")
         
         # 检查是否有PDF文件，如果有，使用我们的自定义处理器
         pdf_files = [f for f in files if str(f).lower().endswith('.pdf')]
@@ -278,10 +279,23 @@ def create_brain_from_documents(files, brain_name="data_knowledge_base"):
         
         # 如果没有PDF文件或自定义处理失败，则使用默认方法
         print("准备创建Brain对象...")
+        try:
+            # 使用最新的OpenAI embeddings模型
+            embedder = OpenAIEmbeddings(
+                openai_api_key=openai_api_key,
+                openai_api_base=openai_base_url,
+                model="text-embedding-3-small"  # 使用最新的嵌入模型
+            )
+            print(f"已创建OpenAI embeddings对象: {type(embedder).__name__}，模型: text-embedding-3-small")
+        except Exception as e:
+            print(f"创建OpenAI embeddings时出错: {str(e)}")
+            print("详细错误信息:")
+            traceback.print_exc()
+            return None
+        
         brain = Brain.from_files(
             name=brain_name,
             file_paths=files,
-            # 不再使用llm参数，Brain内部会处理
             embedder=embedder,
         )
         
@@ -302,15 +316,32 @@ def create_brain_from_documents(files, brain_name="data_knowledge_base"):
 def save_brain(brain, data_dir):
     """保存知识库供未来使用"""
     if brain is None:
+        print("错误: 传入的brain对象为空")
         return None
     
     try:
+        # 生成保存路径
         brains_dir = data_dir / "brains"
-        save_path = brain.save(str(brains_dir))
-        print(f"知识库已保存到: {save_path}")
+        save_path = brains_dir / f"{brain.info().brain_id}.zip"
+        
+        # 保存brain - 异步方法需要特殊处理
+        import asyncio
+        
+        # 获取或创建事件循环
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        
+        # 执行保存操作
+        saved_path = loop.run_until_complete(brain.save(save_path))
+        print(f"知识库已保存到: {saved_path}")
         return save_path
     except Exception as e:
         print(f"保存知识库时出错: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return None
 
 # 交互式问答循环
@@ -321,14 +352,26 @@ def interactive_qa(brain):
         return
     
     # 初始化聊天历史
-    from langchain_core.messages import HumanMessage, AIMessage
-    from uuid import uuid4
+    try:
+        from langchain_core.messages import HumanMessage, AIMessage
+    except ImportError:
+        print("警告: langchain_core未安装，将无法记录聊天历史")
+        HumanMessage = AIMessage = lambda content: type('Message', (), {'content': content})
+    
     chat_history = []
     
     print("\n" + "=" * 50)
     print("欢迎使用 Quivr 知识库问答系统!")
     print("您可以向知识库提问，输入 'exit' 或 'quit' 或 '退出' 退出对话")
     print("=" * 50 + "\n")
+    
+    # 创建事件循环
+    try:
+        import asyncio
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
     
     try:
         while True:
@@ -343,52 +386,103 @@ def interactive_qa(brain):
             # 获取回答
             print("正在思考...")
             
+            # 检查Brain类中可用的方法
+            methods = [method for method in dir(brain) if callable(getattr(brain, method)) and not method.startswith('_')]
+            print(f"Brain类的可用方法: {methods}")
+            
+            # 查看brain的信息
             try:
-                # 检查Brain类中可用的方法
-                methods = [method for method in dir(brain) if callable(getattr(brain, method)) and not method.startswith('_')]
-                print(f"Brain类的可用方法: {methods}")
+                info = brain.info()
+                print(f"Brain ID: {info.brain_id}")
+                doc_count = '未知'
+                if hasattr(info, 'documents') and info.documents is not None:
+                    doc_count = len(info.documents)
+                print(f"Brain中文档总数: {doc_count}")
+            except Exception as info_err:
+                print(f"获取Brain信息失败: {info_err}")
+            
+            # 默认响应，如果所有方法都失败时使用
+            from dataclasses import dataclass
+            @dataclass
+            class MockResponse:
+                answer: str
+            
+            response = None
+            
+            # 先尝试使用asearch直接检索文档
+            print("先直接进行文档检索...")
+            search_results = None
+            try:
+                # 只使用query参数，不传递额外参数
+                search_results = loop.run_until_complete(brain.asearch(query=question))
                 
-                # 使用异步aask方法并处理事件循环
-                import asyncio
+                if search_results and len(search_results) > 0:
+                    print(f"文档搜索结果数量: {len(search_results)}")
+                    print("搜索到的第一个文档片段:")
+                    print("----内容开始----")
+                    print(f"{search_results[0].page_content}")
+                    print("----内容结束----")
+                    print("----元数据----")
+                    print(f"{search_results[0].metadata}")
+                    print("----元数据结束----")
+                else:
+                    print("警告: 搜索未返回任何文档！这可能是问题所在。")
+            except Exception as search_err:
+                print(f"搜索出错: {search_err}")
+                import traceback
+                traceback.print_exc()
+            
+            # 尝试使用aask方法获取回答
+            print("调用aask方法获取回答...")
+            try:
+                # 获取Brain.aask方法的参数信息
+                import inspect
+                aask_params = str(inspect.signature(brain.aask))
+                print(f"Brain.aask方法的参数: {aask_params}")
                 
-                # 检查当前是否有事件循环
+                # 不使用额外参数，只传递必需的参数
                 try:
-                    loop = asyncio.get_event_loop()
-                except RuntimeError:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
+                    # 先尝试最简单的调用方式，只传递question
+                    response = loop.run_until_complete(brain.aask(question=question))
+                    print("使用Brain.aask成功 (简单模式)")
+                except Exception as simple_err:
+                    print(f"简单模式调用失败: {simple_err}")
                     
-                # 调用异步aask方法
-                response = loop.run_until_complete(brain.aask(
-                    question=question
-                ))
-                print(f"使用Brain.aask成功")
-                
+                    # 如果简单模式失败，尝试添加chat_history参数
+                    response = loop.run_until_complete(brain.aask(
+                        question=question,
+                        chat_history=chat_history
+                    ))
+                    print("使用Brain.aask成功 (带聊天历史)")
             except Exception as e:
                 print(f"Brain.aask调用失败: {e}")
+                import traceback
+                traceback.print_exc()
                 print("尝试其他方式...")
                 
-                # 如果失败，创建一个模拟的响应
-                from dataclasses import dataclass
-                
-                @dataclass
-                class MockResponse:
-                    answer: str
-                
+                # 如果所有方法都失败，创建一个模拟的响应
                 response = MockResponse(
                     answer=f"无法连接到知识库服务。错误: {e}"
                 )
+            
+            # 打印回答
             print("回答:")
-            print(response.answer)
+            if response:
+                print(response.answer)
+            else:
+                print("未能获取有效回答")
             print("-" * 50)
             
-            # 更新聊天历史
-            chat_history.append(HumanMessage(content=question))
-            chat_history.append(AIMessage(content=response.answer))
+            # 更新聊天历史 (如果回答有效)
+            if response:
+                chat_history.append(HumanMessage(content=question))
+                chat_history.append(AIMessage(content=response.answer))
     except KeyboardInterrupt:
         print("\n程序已被用户中断。谢谢使用Quivr知识库！")
     except Exception as e:
         print(f"\n处理问题时出错: {str(e)}")
+        import traceback
+        traceback.print_exc()
 
 # 主程序
 def main():
