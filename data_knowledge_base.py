@@ -420,10 +420,31 @@ def interactive_qa(brain):
                     print(f"文档搜索结果数量: {len(search_results)}")
                     print("搜索到的第一个文档片段:")
                     print("----内容开始----")
-                    print(f"{search_results[0].page_content}")
+                    # 检查SearchResult对象的结构并正确访问内容
+                    result = search_results[0]
+                    if hasattr(result, 'page_content'):
+                        # langchain文档格式
+                        content = result.page_content
+                        metadata = result.metadata if hasattr(result, 'metadata') else {}
+                    elif hasattr(result, 'content'):
+                        # 可能是Quivr自定义格式
+                        content = result.content
+                        metadata = result.metadata if hasattr(result, 'metadata') else {}
+                    elif hasattr(result, 'text'):
+                        # 可能是另一种格式
+                        content = result.text
+                        metadata = result.metadata if hasattr(result, 'metadata') else {}
+                    else:
+                        # 处理未知格式
+                        content = str(result)
+                        metadata = {}
+                        # 尝试检查结果对象的所有属性
+                        print("搜索结果对象的属性:", dir(result))
+                    
+                    print(content)
                     print("----内容结束----")
                     print("----元数据----")
-                    print(f"{search_results[0].metadata}")
+                    print(metadata)
                     print("----元数据结束----")
                 else:
                     print("警告: 搜索未返回任何文档！这可能是问题所在。")
